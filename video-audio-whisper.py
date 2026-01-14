@@ -1,3 +1,4 @@
+from xml.parsers.expat import model
 from flask import Flask, request, jsonify, render_template
 from werkzeug.exceptions import RequestEntityTooLarge
 import whisper
@@ -6,6 +7,17 @@ import tempfile
 import cv2
 import traceback
 import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = ""  # force CPU-only
+
+WHISPER_MODEL = None
+
+def get_whisper_model():
+    global WHISPER_MODEL
+    if WHISPER_MODEL is None:
+        print("Lazy-loading Whisper tiny model...")
+        WHISPER_MODEL = whisper.load_model("tiny", device="cpu")
+    return WHISPER_MODEL
 
 # ---------------- Flask App ----------------
 app = Flask(__name__)
@@ -17,9 +29,10 @@ SUPABASE_ANON_KEY = "sb_publishable_8ciah4qOvKKdACDVMUe4Yw_q8gwSAGN"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 # ---------------- Load Whisper Model ----------------
-print("Loading Whisper model...")
-WHISPER_MODEL = whisper.load_model("base")
-print("Whisper model loaded.")
+# print("Loading Whisper model...")
+# # WHISPER_MODEL = whisper.load_model("base")
+# WHISPER_MODEL = whisper.load_model("tiny", device="cpu")
+# print("Whisper model loaded.")
 
 # ---------------- Helper: Format Timestamp ----------------
 def format_timestamp(seconds):
@@ -42,7 +55,9 @@ def transcribe_video(file_bytes):
 
     try:
         # Use try-except to catch empty/invalid audio
-        result = WHISPER_MODEL.transcribe(tmp_path)
+        # result = WHISPER_MODEL.transcribe(tmp_path)
+        model = get_whisper_model()
+        result = model.transcribe(tmp_path)
         if "segments" not in result or not result["segments"]:
             raise ValueError("No audio detected in the video.")
         
@@ -137,13 +152,16 @@ def upload_file():
         if not file:
             return jsonify({"error": "No video file provided"}), 400
 
-        file_bytes = file.read()
-        if not file_bytes:
+        # file_bytes = file.read()
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            file.save(tmp)
+            tmp_path = tmp.name
+        if not tmp_path or os.path.getsize(tmp_path) == 0:
             return jsonify({"error": "Uploaded video is empty"}), 400
 
         # ---------------- Transcription ----------------
         try:
-            transcript_text = transcribe_video(file_bytes)
+            transcript_text = transcribe_video(tmp_path)
         except Exception as e:
             print("Whisper transcription error:\n", traceback.format_exc())
             return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
@@ -164,7 +182,7 @@ def upload_file():
 
         # ---------------- Process frames ----------------
         try:
-            frames = process_frames_and_upload(file_bytes, transcript_id)
+            frames = process_frames_and_upload(tmp_path, transcript_id)
         except Exception as e:
             print("Frame processing/upload error:\n", traceback.format_exc())
             frames = []  # Don't block upload if frames fail
@@ -199,5 +217,9 @@ def index():
     return render_template("main.html")
 
 # ---------------- Run App ----------------
+# if __name__ == "__main__":
+#     app.run(debug=True)
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
